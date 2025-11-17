@@ -3,6 +3,6 @@ services:
     name: secure-vault
     env: docker
     plan: free
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: Dockerfile
     healthCheckPath: /
     autoDeploy: true
