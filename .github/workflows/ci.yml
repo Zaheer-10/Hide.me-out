@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install poetry
+          poetry config virtualenvs.create false
+          poetry install
+      - name: Lint (ruff)
+        run: |
+          ruff check .
+      - name: Type check (mypy)
+        run: |
+          mypy vault
+      - name: Run tests
+        run: |
+          pytest -q --disable-warnings --maxfail=1 --cov=vault --cov-report=term-missing
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          if [ -z "$RENDER_API_KEY" ] || [ -z "$RENDER_SERVICE_ID" ]; then
+            echo "Render secrets not configured; skipping deploy" && exit 0
+          fi
+          curl -s -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
+            -d '{}'

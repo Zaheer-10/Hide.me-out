@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.python-version
+
+# Packaging
+*.egg-info/
+build/
+dist/
+
+# Poetry
+.venv/
+
+# Tests & Coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Env & secrets
+.env
+*.env
+
+# App storage (instance-specific, do not commit)
+vault/storage/config.json
+vault/storage/vault.json
+vault/storage/audit.log
+vault/storage/instance.secret
+vault/storage/biometric.db

@@ -1,0 +1,500 @@
+{
+  "info": {
+    "name": "SecureVault API (Local)",
+    "_postman_id": "5cbe1f08-37a1-4f3f-9e36-securevault-api-local",
+    "description": "CSRF token, master setup, AES-256-GCM encryption/decryption with standardized responses and security checks.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000", "type": "string" },
+    { "key": "csrf_token", "value": "", "type": "string" },
+    { "key": "master_password", "value": "Str0ng!Passw0rd", "type": "string" },
+    { "key": "service_name", "value": "github", "type": "string" },
+    { "key": "username", "value": "alice", "type": "string" },
+    { "key": "password", "value": "S3cr3t!", "type": "string" },
+    { "key": "new_password", "value": "NewStr0ng!Passw0rd", "type": "string" },
+    { "key": "encrypted_key", "value": "", "type": "string" },
+    { "key": "nonce_b64", "value": "", "type": "string" },
+    { "key": "vault_keyword", "value": "git", "type": "string" },
+    { "key": "export_path", "value": "/Users/zaheer/WORKS/SecureSensitiveDataEncrypt/vault/storage/backup.json", "type": "string" },
+    { "key": "import_path", "value": "/Users/zaheer/WORKS/SecureSensitiveDataEncrypt/vault/storage/backup.json", "type": "string" },
+    { "key": "merge", "value": "false", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Get CSRF Token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/auth/csrf-token", "host": ["{{base_url}}"], "path": ["api", "auth", "csrf-token"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const json = pm.response.json();",
+                  "pm.test('Success true & token present', () => json.success && json.data && json.data.csrf_token);",
+                  "pm.collectionVariables.set('csrf_token', json.data.csrf_token);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Setup Master (One-time)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/auth/setup-master", "host": ["{{base_url}}"], "path": ["api", "auth", "setup-master"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"{{master_password}}\",\n  \"confirm\": \"{{master_password}}\",\n  \"masked\": true\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 Created or 409', () => pm.response.code === 201 || pm.response.code === 409);",
+                  "const json = pm.response.json();",
+                  "if (pm.response.code === 201) {",
+                  "  pm.test('Master setup success', () => json.success && json.code === 'master_setup');",
+                  "} else {",
+                  "  pm.test('Master already exists', () => json.code === 'master_exists');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Passwords",
+      "item": [
+        {
+          "name": "Encrypt Password (AES-256-GCM)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/passwords/encrypt", "host": ["{{base_url}}"], "path": ["api", "passwords", "encrypt"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"service_name\": \"{{service_name}}\",\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const json = pm.response.json();",
+                  "pm.test('Success & encrypted fields present', () => json.success && json.data && json.data.encrypted_key && json.data.nonce_b64);",
+                  "pm.collectionVariables.set('encrypted_key', json.data.encrypted_key);",
+                  "pm.collectionVariables.set('nonce_b64', json.data.nonce_b64);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Decrypt Password (with master)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/passwords/decrypt", "host": ["{{base_url}}"], "path": ["api", "passwords", "decrypt"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"encrypted_key\": \"{{encrypted_key}}\",\n  \"nonce_b64\": \"{{nonce_b64}}\",\n  \"master_password\": \"{{master_password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const json = pm.response.json();",
+                  "pm.test('Success & decrypted fields present', () => json.success && json.data && json.data.service_name && json.data.username && json.data.password);",
+                  "pm.test('Service matches', () => json.data.service_name === pm.collectionVariables.get('service_name'));",
+                  "pm.test('Username matches', () => json.data.username === pm.collectionVariables.get('username'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Password (JSON)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/passwords/update", "host": ["{{base_url}}"], "path": ["api", "passwords", "update"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"service_name\": \"{{service_name}}\",\n  \"new_password\": \"{{new_password}}\",\n  \"master_password\": \"{{master_password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const json = pm.response.json();",
+                  "pm.test('Update success', () => json.success && json.code === 'updated');",
+                  "pm.test('Service echoed', () => json.data && json.data.service_name === pm.collectionVariables.get('service_name'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Error Cases",
+      "item": [
+        {
+          "name": "Setup Master - Weak Password (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/auth/setup-master", "host": ["{{base_url}}"], "path": ["api", "auth", "setup-master"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"weak\",\n  \"confirm\": \"weak\",\n  \"masked\": true\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.code === 400);",
+                  "const json = pm.response.json();",
+                  "pm.test('Weak password code', () => json.code === 'weak_password');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Decrypt - Wrong Master (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/passwords/decrypt", "host": ["{{base_url}}"], "path": ["api", "passwords", "decrypt"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"encrypted_key\": \"{{encrypted_key}}\",\n  \"nonce_b64\": \"{{nonce_b64}}\",\n  \"master_password\": \"WrongMaster123!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.code === 401);",
+                  "const json = pm.response.json();",
+                  "pm.test('Auth failed code', () => json.code === 'auth_failed');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Setup Master - Missing CSRF (403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/api/auth/setup-master", "host": ["{{base_url}}"], "path": ["api", "auth", "setup-master"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"{{master_password}}\",\n  \"confirm\": \"{{master_password}}\",\n  \"masked\": true\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('403 Forbidden', () => pm.response.code === 403);",
+                  "const json = pm.response.json();",
+                  "pm.test('CSRF invalid code', () => json.code === 'csrf_invalid');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Password - Weak (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/passwords/update", "host": ["{{base_url}}"], "path": ["api", "passwords", "update"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"service_name\": \"{{service_name}}\",\n  \"new_password\": \"weak\",\n  \"master_password\": \"{{master_password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.code === 400);",
+                  "const json = pm.response.json();",
+                  "pm.test('Weak password code', () => json.code === 'weak_password');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Password - Wrong Master (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/passwords/update", "host": ["{{base_url}}"], "path": ["api", "passwords", "update"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"service_name\": \"doesnotexist\",\n  \"new_password\": \"NewStr0ng!Passw0rd\",\n  \"master_password\": \"WrongMaster123!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.code === 401);",
+                  "const json = pm.response.json();",
+                  "pm.test('Auth failed code', () => json.code === 'auth_failed');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Password - Not Found (404)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-CSRF-Token", "value": "{{csrf_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/passwords/update", "host": ["{{base_url}}"], "path": ["api", "passwords", "update"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"service_name\": \"unknown_service\",\n  \"new_password\": \"NewStr0ng!Passw0rd\",\n  \"master_password\": \"{{master_password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.code === 404);",
+                  "const json = pm.response.json();",
+                  "pm.test('Not found code', () => json.code === 'not_found');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    }
+    ,
+    {
+      "name": "Vault (UI Form APIs)",
+      "item": [
+        {
+          "name": "Get Entry (HTML form)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "url": { "raw": "{{base_url}}/get", "host": ["{{base_url}}"], "path": ["get"] },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "master", "value": "{{master_password}}" },
+                { "key": "service", "value": "{{service_name}}" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK (HTML)', () => pm.response.code === 200);",
+                  "pm.test('Contains service name', () => pm.response.text().includes(pm.collectionVariables.get('service_name')));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search Entries (HTML form)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "url": { "raw": "{{base_url}}/search", "host": ["{{base_url}}"], "path": ["search"] },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "master", "value": "{{master_password}}" },
+                { "key": "keyword", "value": "{{vault_keyword}}" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK (HTML)', () => pm.response.code === 200);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Export Vault (HTML form)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "url": { "raw": "{{base_url}}/export", "host": ["{{base_url}}"], "path": ["export"] },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "master", "value": "{{master_password}}" },
+                { "key": "path", "value": "{{export_path}}" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('303 Redirect after export', () => pm.response.code === 303);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Import Vault (HTML form)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "url": { "raw": "{{base_url}}/import", "host": ["{{base_url}}"], "path": ["import"] },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "master", "value": "{{master_password}}" },
+                { "key": "path", "value": "{{import_path}}" },
+                { "key": "merge", "value": "{{merge}}" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('303 Redirect after import', () => pm.response.code === 303);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Entry (HTML form)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "url": { "raw": "{{base_url}}/update", "host": ["{{base_url}}"], "path": ["update"] },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "master", "value": "{{master_password}}" },
+                { "key": "service", "value": "{{service_name}}" },
+                { "key": "new_password", "value": "{{new_password}}" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 OK (HTML)', () => pm.response.code === 200);",
+                  "pm.test('Contains service name', () => pm.response.text().includes(pm.collectionVariables.get('service_name')));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
