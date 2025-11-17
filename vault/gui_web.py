@@ -705,7 +705,7 @@ def dashboard() -> HTMLResponse:
     master_hash = cfg.get("master_password_hash")
     master_set_count = cfg.get("master_set_count")
     rotations_count = cfg.get("rotations_count")
-    entries_display = entries if master_hash else 0
+    entries_display = entries
     content = f"""
     <div class=\"grid grid-2\">
       <div class=\"card\">
@@ -1108,10 +1108,6 @@ def import_get() -> HTMLResponse:
         "<h3>Import Encrypted Vault</h3>"
         "<form method='post' enctype='multipart/form-data'>"
         "<div class='form-grid'>"
-        "<div class='field'><label>Master Password</label><div class='input-row'>"
-        "<input type='password' name='master' required />"
-        "<button type='button' class='btn eye' onclick=\"const i=this.previousElementSibling; const w=i.type==='password'; i.type=w?'text':'password'; this.textContent=i.type==='password'?'👁️':'🙈'; if(w){setTimeout(()=>{i.type='password'; this.textContent='👁️';},3000)}\">👁️</button>"
-        "</div></div>"
         "<div><label>Encrypted Vault File (.json)</label><input type='file' name='file' accept='application/json,.json' required /></div>"
         "<div style='grid-column: 1 / -1; display: flex; align-items: center; gap: 8px;'>"
         "<input type='checkbox' name='merge' id='merge' />"
@@ -1127,22 +1123,8 @@ def import_get() -> HTMLResponse:
 
 @app.post("/import", response_class=HTMLResponse)
 async def import_post(
-    master: str = Form(...), merge: bool = Form(False), file: UploadFile = File(...)
+    merge: bool = Form(False), file: UploadFile = File(...)
 ) -> HTMLResponse:
-    stored = get_master_password_hash()
-    try:
-        stored_str = stored or ""
-        valid = bool(stored_str) and bcrypt.checkpw(
-            master.encode("utf-8"), stored_str.encode("utf-8")
-        )
-    except Exception:
-        valid = False
-    if not valid:
-        return HTMLResponse(
-            BASE_TEMPLATE.render(
-                content="<div class='card'><p>Master password invalid.</p></div>"
-            )
-        )
     try:
         ct = (file.content_type or "").lower()
         if not (ct.endswith("json") or ct == "application/json"):
@@ -1191,11 +1173,7 @@ async def import_post(
                     content="<div class='card'><p>Import failed while saving.</p></div>"
                 )
             )
-        return HTMLResponse(
-            BASE_TEMPLATE.render(
-                content="<div class='card'><p>Encrypted vault imported successfully.</p></div>"
-            )
-        )
+        return HTMLResponse(BASE_TEMPLATE.render(content="<div class='card'><p>Encrypted vault imported successfully.</p></div>"))
     except Exception:
         return HTMLResponse(
             BASE_TEMPLATE.render(

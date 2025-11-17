@@ -32,7 +32,9 @@ from typing import Any, Dict, Optional
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "storage", "config.json")
 DEFAULT_VAULT_PATH = os.path.join(os.path.dirname(__file__), "storage", "vault.json")
 DEFAULT_AUDIT_LOG_PATH = os.path.join(os.path.dirname(__file__), "storage", "audit.log")
-DEFAULT_INSTANCE_SECRET_PATH = os.path.join(os.path.dirname(__file__), "storage", "instance.secret")
+DEFAULT_INSTANCE_SECRET_PATH = os.path.join(
+    os.path.dirname(__file__), "storage", "instance.secret"
+)
 
 
 @dataclass
@@ -182,6 +184,7 @@ def ensure_instance_materials(cfg_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, 
 
     if not cfg.get("app_instance_id"):
         import uuid
+
         cfg["app_instance_id"] = str(uuid.uuid4())
         changed = True
 
@@ -229,6 +232,7 @@ def get_app_salt() -> bytes:
     cfg = ensure_instance_materials()
     b64 = cfg.get("app_salt_b64") or ""
     import base64 as _b64
+
     return _b64.urlsafe_b64decode(b64.encode("ascii"))
 
 
@@ -239,9 +243,13 @@ def get_csrf_secret() -> str:
 
 
 def get_master_password_hash() -> Optional[str]:
-    """Return stored bcrypt hash for the master password (or None)."""
+    """Return stored bcrypt hash for the master password (or None).
+
+    Normalizes empty string to None for robustness against legacy configs.
+    """
     cfg = load_config()
-    return cfg.get("master_password_hash")
+    val = cfg.get("master_password_hash")
+    return val if val else None
 
 
 def set_master_password_hash(hash_str: str) -> None:
