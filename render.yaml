@@ -1,8 +1,5 @@
 services:
   - type: web
-    name: secure-vault
+    name: your-service-name
     env: docker
-    plan: free
-    dockerfilePath: Dockerfile
-    healthCheckPath: /
-    autoDeploy: true
+    dockerfilePath: ./Dockerfile  # Use relative path from repository root
