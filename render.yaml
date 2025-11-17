@@ -2,4 +2,5 @@ services:
   - type: web
     name: your-service-name
     env: docker
-    dockerfilePath: ./Dockerfile  # Use relative path from repository root
+    dockerfilePath: Dockerfile  # Remove the ./ prefix
+    dockerContext: .  # Explicitly set build context to root
