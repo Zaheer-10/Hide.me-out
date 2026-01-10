@@ -8,12 +8,14 @@ Architecture Overview:
 - SecurityPolicy defines configurable KDF parameters and app behavior.
 - Config storage uses JSON at `vault/storage/config.json` with safe defaults.
 - Logging emits to `vault/storage/audit.log` with restrictive permissions.
+- S3 cloud storage integration for vault synchronization.
 
 Threat Model Notes:
 - Audit logs must not include secrets. Only metadata and event categories
   are recorded. Files are created with `0o600` permissions on POSIX.
 - Config values are treated as non-sensitive; secrets (master password,
   keys) are never logged or stored.
+- S3 credentials are stored in environment variables, not in config files.
 
 Google-Style Docstrings are used for clarity and maintainability.
 """
@@ -48,6 +50,8 @@ class SecurityPolicy:
         proton_drive_path: Target path for encrypted vault sync (local folder).
         biometric_enabled: Whether biometric unlock is enabled.
         biometric_storage_path: Path to SQLite DB storing encrypted master blob.
+        s3_sync_enabled: Whether S3 cloud sync is enabled.
+        s3_auto_sync: Whether to auto-sync to S3 on every vault change.
     """
 
     pbkdf2_iterations: int = 200_000
@@ -58,13 +62,15 @@ class SecurityPolicy:
     biometric_storage_path: str = os.path.join(
         os.path.dirname(__file__), "storage", "biometric.db"
     )
+    s3_sync_enabled: bool = True
+    s3_auto_sync: bool = True
 
 
-def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
+def load_config(path: str | None = None) -> Dict[str, Any]:
     """Load configuration JSON.
 
     Args:
-        path: Path to the configuration file.
+        path: Path to the configuration file. If None, uses DEFAULT_CONFIG_PATH.
 
     Returns:
         A dictionary with configuration values. If the file does not exist,
@@ -73,6 +79,8 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
     Raises:
         json.JSONDecodeError: If the config file contains invalid JSON.
     """
+    if path is None:
+        path = DEFAULT_CONFIG_PATH
 
     default = {
         "version": "1.0.0",
@@ -87,6 +95,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
         "last_backup": None,
         # Auth and security additions
         "master_password_hash": None,
+        "master_password_hint": None,
         "master_set_count": 0,
         "last_master_set_at": None,
         "rotations_count": 0,
@@ -98,6 +107,12 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
         "rate_limit_window_sec": 60,
         "rate_limit_max": 5,
         "bcrypt_rounds": 14,
+        "entries_created_count": 0,
+        "entries_deleted_count": 0,
+        # S3 sync settings
+        "s3_sync_enabled": True,
+        "s3_auto_sync": True,
+        "last_s3_sync_at": None,
     }
 
     if not os.path.exists(path):
@@ -122,18 +137,23 @@ def _atomic_write_json(path: str, data: Dict[str, Any]) -> None:
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
     tmp_path = f"{path}.tmp"
+    # Create with restrictive permissions (0o600)
     with open(tmp_path, "w", encoding="utf-8") as f:
+        try:
+            os.chmod(tmp_path, 0o600)
+        except Exception:
+            pass  # Best effort on non-POSIX
         json.dump(data, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_path, path)
 
 
-def configure_logging(audit_path: str = DEFAULT_AUDIT_LOG_PATH) -> logging.Logger:
+def configure_logging(audit_path: str | None = None) -> logging.Logger:
     """Configure secure logging to an audit trail file.
 
     Args:
-        audit_path: Path to the audit log file.
+        audit_path: Path to the audit log file. If None, uses DEFAULT_AUDIT_LOG_PATH.
 
     Returns:
         A configured `logging.Logger` instance.
@@ -142,6 +162,8 @@ def configure_logging(audit_path: str = DEFAULT_AUDIT_LOG_PATH) -> logging.Logge
         - Creates the file if absent and restricts permissions to 0o600.
         - Avoids logging secrets; callers must pass sanitized metadata only.
     """
+    if audit_path is None:
+        audit_path = DEFAULT_AUDIT_LOG_PATH
 
     logger = logging.getLogger("vault_audit")
     logger.setLevel(logging.INFO)
@@ -170,15 +192,17 @@ def configure_logging(audit_path: str = DEFAULT_AUDIT_LOG_PATH) -> logging.Logge
     return logger
 
 
-def ensure_instance_materials(cfg_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
+def ensure_instance_materials(cfg_path: str | None = None) -> Dict[str, Any]:
     """Ensure config contains instance-bound materials and on-disk secret.
-
+    
     - Generates and persists `app_instance_id`, `app_salt_b64`, `csrf_secret_b64` if missing.
     - Creates an on-disk `instance.secret` file (0o600) containing a high-entropy secret.
 
     Returns:
         Updated config dict.
     """
+    if cfg_path is None:
+        cfg_path = DEFAULT_CONFIG_PATH
     cfg = load_config(cfg_path)
     changed = False
 
@@ -215,9 +239,28 @@ def ensure_instance_materials(cfg_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, 
     return cfg
 
 
-def save_config(cfg: Dict[str, Any], path: str = DEFAULT_CONFIG_PATH) -> None:
+def save_config(cfg: Dict[str, Any], path: str | None = None) -> None:
     """Persist provided config dict atomically."""
+    if path is None:
+        path = DEFAULT_CONFIG_PATH
     _atomic_write_json(path, cfg)
+
+
+def increment_stat(stat_name: str, amount: int = 1) -> int:
+    """Atomically increment a statistic counter in config.
+
+    Args:
+        stat_name: Name of the statistic key (e.g., "entries_created_count").
+        amount: Amount to increment by.
+
+    Returns:
+        The new value of the statistic.
+    """
+    cfg = load_config()
+    val = int(cfg.get(stat_name, 0)) + amount
+    cfg[stat_name] = val
+    save_config(cfg)
+    return val
 
 
 def get_instance_secret() -> bytes:
@@ -322,4 +365,117 @@ def build_policy_from_config(cfg: Dict[str, Any]) -> SecurityPolicy:
                 os.path.join(os.path.dirname(__file__), "storage", "biometric.db"),
             )
         ),
+        s3_sync_enabled=bool(cfg.get("s3_sync_enabled", True)),
+        s3_auto_sync=bool(cfg.get("s3_auto_sync", True)),
     )
+
+
+def get_master_password_hint() -> Optional[str]:
+    """Return stored master password hint (or None).
+    
+    First checks S3 for hint, then falls back to local config.
+    """
+    # Try S3 first if configured
+    try:
+        from .utils.s3_storage import is_s3_configured, get_hint_from_s3
+        if is_s3_configured():
+            hint = get_hint_from_s3()
+            if hint:
+                return hint
+    except Exception:
+        pass
+    
+    # Fall back to local config
+    cfg = load_config()
+    return cfg.get("master_password_hint")
+
+
+def set_master_password_hint(hint: str) -> bool:
+    """Store master password hint in S3 and local config.
+    
+    Args:
+        hint: Hint text to store.
+    
+    Returns:
+        True if hint was stored successfully.
+    """
+    success = True
+    
+    # Store in S3 if configured
+    try:
+        from .utils.s3_storage import is_s3_configured, save_hint_to_s3
+        if is_s3_configured():
+            s3_ok = save_hint_to_s3(hint)
+            success = success and s3_ok
+    except Exception:
+        pass
+    
+    # Also store locally (encrypted in config is optional backup)
+    cfg = load_config()
+    cfg["master_password_hint"] = hint
+    save_config(cfg)
+    
+    return success
+
+
+def clear_master_password_hint() -> None:
+    """Clear master password hint from S3 and local config."""
+    # Clear from S3
+    try:
+        from .utils.s3_storage import is_s3_configured, delete_hint_from_s3
+        if is_s3_configured():
+            delete_hint_from_s3()
+    except Exception:
+        pass
+    
+    # Clear from local config
+    cfg = load_config()
+    cfg["master_password_hint"] = None
+    save_config(cfg)
+
+
+def initialize_s3_vault() -> bool:
+    """Initialize vault from S3 on application startup.
+    
+    Downloads vault from S3 if it exists, otherwise prepares for new vault.
+    
+    Returns:
+        True if initialization succeeded.
+    """
+    try:
+        from .utils.s3_storage import is_s3_configured, initialize_from_s3
+        if is_s3_configured():
+            return initialize_from_s3(DEFAULT_VAULT_PATH, DEFAULT_CONFIG_PATH)
+        return True
+    except Exception:
+        return True  # Don't fail if S3 is not configured
+
+
+def sync_vault_to_s3() -> tuple:
+    """Manually sync vault and config to S3.
+    
+    Returns:
+        Tuple of (success, message).
+    """
+    try:
+        from .utils.s3_storage import is_s3_configured, sync_to_s3
+        if not is_s3_configured():
+            return False, "S3 not configured"
+        return sync_to_s3(DEFAULT_VAULT_PATH, DEFAULT_CONFIG_PATH)
+    except Exception as e:
+        return False, str(e)
+
+
+def sync_vault_from_s3() -> tuple:
+    """Manually sync vault and config from S3.
+    
+    Returns:
+        Tuple of (success, message).
+    """
+    try:
+        from .utils.s3_storage import is_s3_configured, sync_from_s3
+        if not is_s3_configured():
+            return False, "S3 not configured"
+        return sync_from_s3(DEFAULT_VAULT_PATH, DEFAULT_CONFIG_PATH)
+    except Exception as e:
+        return False, str(e)

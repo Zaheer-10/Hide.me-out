@@ -38,8 +38,13 @@ from .config import (
     get_master_password_hash,
     set_master_password_hash,
     clear_master_password_hash,
+    get_master_password_hint,
+    set_master_password_hint,
+    clear_master_password_hint,
     load_config,
+    save_config,
 )
+from .utils.s3_storage import is_s3_configured, get_s3_status
 from .utils.aes import derive_aes_key, aes_gcm_encrypt, aes_gcm_decrypt
 
 # bcrypt is used for master password hashing/verification
@@ -146,6 +151,7 @@ BASE_TEMPLATE = Template(
             <a href="/services">Services</a>
             <a href="/export">Export</a>
             <a href="/import">Import</a>
+            <a href="/s3">S3 Sync</a>
             <a href="/dashboard">Dashboard</a>
             <a href="/master">Master</a>
             <a href="/reset">Reset</a>
@@ -254,12 +260,14 @@ class SetupMasterRequest(BaseModel):
     password: str = Field(..., min_length=12)
     confirm: str = Field(..., min_length=12)
     masked: bool = Field(True, description="Client-side mask/unmask preference")
+    hint: str = Field("", description="Optional master password hint stored in S3")
     model_config = dict(
         json_schema_extra={
             "example": {
                 "password": "Str0ng!MasterPass",
                 "confirm": "Str0ng!MasterPass",
                 "masked": True,
+                "hint": "My favorite pet's name + birth year",
             }
         }
     )
@@ -405,11 +413,15 @@ def setup_master(
     hash_str = bcrypt.hashpw(req.password.encode("utf-8"), salt).decode("utf-8")
     set_master_password_hash(hash_str)
 
+    # Store hint if provided
+    if req.hint and req.hint.strip():
+        set_master_password_hint(req.hint.strip())
+
     return StandardResponse(
         success=True,
         code="master_setup",
         message="Master password configured",
-        data={"masked": req.masked},
+        data={"masked": req.masked, "hint_set": bool(req.hint and req.hint.strip())},
     )
 
 
@@ -680,6 +692,197 @@ def api_update(
     )
 
 
+# ------------------------------ S3 Sync API --------------------------------
+
+
+@app.get(
+    "/api/s3/status",
+    summary="Get S3 sync status",
+    description="Returns the current S3 configuration and sync status.",
+    tags=["S3"],
+    response_model=StandardResponse,
+)
+def api_s3_status():
+    status = get_s3_status()
+    return StandardResponse(
+        success=True,
+        code="s3_status",
+        message="S3 status retrieved",
+        data=status,
+    )
+
+
+@app.post(
+    "/api/s3/sync-to",
+    summary="Sync vault to S3",
+    description="Uploads the local vault and config to S3 bucket.",
+    tags=["S3"],
+    response_model=StandardResponse,
+)
+def api_s3_sync_to(
+    _https: None = Depends(_enforce_https),
+    _csrf: None = Depends(require_csrf),
+):
+    from .vault import sync_to_s3
+    
+    if not is_s3_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "success": False,
+                "code": "s3_not_configured",
+                "message": "S3 is not configured",
+                "error": "Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME env vars",
+            },
+        )
+    
+    success, message = sync_to_s3()
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "success": False,
+                "code": "s3_sync_failed",
+                "message": "S3 sync failed",
+                "error": message,
+            },
+        )
+    
+    # Update last sync timestamp
+    cfg = load_config()
+    cfg["last_s3_sync_at"] = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+    save_config(cfg)
+    
+    return StandardResponse(
+        success=True,
+        code="s3_synced",
+        message="Vault synced to S3",
+        data={"details": message},
+    )
+
+
+@app.post(
+    "/api/s3/sync-from",
+    summary="Sync vault from S3",
+    description="Downloads the vault and config from S3 bucket to local storage.",
+    tags=["S3"],
+    response_model=StandardResponse,
+)
+def api_s3_sync_from(
+    _https: None = Depends(_enforce_https),
+    _csrf: None = Depends(require_csrf),
+):
+    from .vault import sync_from_s3
+    
+    if not is_s3_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "success": False,
+                "code": "s3_not_configured",
+                "message": "S3 is not configured",
+                "error": "Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME env vars",
+            },
+        )
+    
+    success, message = sync_from_s3()
+    
+    return StandardResponse(
+        success=success,
+        code="s3_synced" if success else "s3_sync_partial",
+        message="Vault synced from S3" if success else "S3 sync completed with issues",
+        data={"details": message},
+    )
+
+
+@app.get(
+    "/api/auth/hint",
+    summary="Get master password hint",
+    description="Retrieves the master password hint from S3 (if set).",
+    tags=["Auth"],
+    response_model=StandardResponse,
+)
+def api_get_hint():
+    hint = get_master_password_hint()
+    if not hint:
+        return StandardResponse(
+            success=True,
+            code="no_hint",
+            message="No master password hint set",
+            data={"hint": None},
+        )
+    return StandardResponse(
+        success=True,
+        code="hint_found",
+        message="Master password hint retrieved",
+        data={"hint": hint},
+    )
+
+
+@app.post(
+    "/api/auth/hint",
+    summary="Set master password hint",
+    description="Stores an encrypted master password hint in S3.",
+    tags=["Auth"],
+    response_model=StandardResponse,
+)
+def api_set_hint(
+    request: Request,
+    hint: str = Form(...),
+    master_password: str = Form(...),
+    _https: None = Depends(_enforce_https),
+    _csrf: None = Depends(require_csrf),
+):
+    # Verify master password first
+    stored = get_master_password_hash()
+    if not stored:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "success": False,
+                "code": "master_missing",
+                "message": "Master password not configured",
+                "error": "Set up master password first",
+            },
+        )
+    
+    try:
+        ok = bcrypt.checkpw(master_password.encode("utf-8"), stored.encode("utf-8"))
+    except Exception:
+        ok = False
+    
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "success": False,
+                "code": "auth_failed",
+                "message": "Master password invalid",
+                "error": "Authentication required",
+            },
+        )
+    
+    if not hint or not hint.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "success": False,
+                "code": "invalid_hint",
+                "message": "Hint cannot be empty",
+                "error": "Provide a non-empty hint",
+            },
+        )
+    
+    success = set_master_password_hint(hint.strip())
+    
+    return StandardResponse(
+        success=success,
+        code="hint_set" if success else "hint_failed",
+        message="Master password hint saved" if success else "Failed to save hint",
+        data={},
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 def home() -> HTMLResponse:
     content = """
@@ -705,6 +908,8 @@ def dashboard() -> HTMLResponse:
     master_hash = cfg.get("master_password_hash")
     master_set_count = cfg.get("master_set_count")
     rotations_count = cfg.get("rotations_count")
+    entries_created = cfg.get("entries_created_count", 0)
+    entries_deleted = cfg.get("entries_deleted_count", 0)
     entries_display = entries
     content = f"""
     <div class=\"grid grid-2\">
@@ -716,7 +921,9 @@ def dashboard() -> HTMLResponse:
       </div>
       <div class=\"card\">
         <h3>Passwords</h3>
-        <div>Total entries: {entries_display}</div>
+        <div>Active entries: {entries_display}</div>
+        <div>Total created: {entries_created}</div>
+        <div>Total deleted: {entries_deleted}</div>
       </div>
     </div>
     """
@@ -1322,6 +1529,11 @@ def master_setup_get() -> HTMLResponse:
               <button type="button" class="btn eye" onclick="this.previousElementSibling.type=this.previousElementSibling.type==='password'?'text':'password'; this.textContent=this.previousElementSibling.type==='password'?'👁️':'🙈';">👁️</button>
             </div>
           </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Master Password Hint (optional, stored in S3)</label>
+            <input type="text" name="hint" placeholder="e.g., My favorite pet's name + birth year" />
+            <p class="hint">This hint will be encrypted and stored in S3 to help you remember your password.</p>
+          </div>
         </div>
         <p class="hint">Min 12 chars, upper, lower, digit, symbol</p>
         <div class="actions">
@@ -1335,7 +1547,7 @@ def master_setup_get() -> HTMLResponse:
 
 @app.post("/master/setup", response_class=HTMLResponse)
 def master_setup_post(
-    password: str = Form(...), confirm: str = Form(...)
+    password: str = Form(...), confirm: str = Form(...), hint: str = Form("")
 ) -> HTMLResponse:
     if password != confirm:
         content = "<div class='card'><p>Passwords do not match.</p></div>"
@@ -1351,13 +1563,16 @@ def master_setup_post(
     salt = bcrypt.gensalt(rounds)
     hash_str = bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
     set_master_password_hash(hash_str)
+    
+    # Store hint if provided
+    if hint and hint.strip():
+        set_master_password_hint(hint.strip())
+    
     try:
         cfg["master_set_count"] = int(cfg.get("master_set_count", 0)) + 1
         cfg["last_master_set_at"] = (
             __import__("datetime").datetime.utcnow().isoformat() + "Z"
         )
-        from .config import save_config
-
         save_config(cfg)
     except Exception:
         pass
@@ -1563,4 +1778,163 @@ def reset_post(old: str = Form(...), confirmreset: bool = Form(False)) -> HTMLRe
         content = "<div class='card'><p>Vault reset successfully.</p></div>"
     else:
         content = "<div class='card'><p>Reset failed.</p></div>"
+    return HTMLResponse(BASE_TEMPLATE.render(content=content))
+
+
+# ------------------------------ S3 Sync Pages ------------------------------
+
+
+@app.get("/s3", response_class=HTMLResponse)
+def s3_home() -> HTMLResponse:
+    s3_status = get_s3_status()
+    hint = get_master_password_hint()
+    
+    status_cards = f"""
+    <div class="grid grid-2">
+      <div class="card">
+        <h3>S3 Configuration</h3>
+        <div>Configured: {"✓ Yes" if s3_status.get("configured") else "✗ No"}</div>
+        {"<div>Bucket: <code>" + s3_status.get("bucket", "") + "</code></div>" if s3_status.get("configured") else ""}
+        {"<div>Region: " + s3_status.get("region", "") + "</div>" if s3_status.get("configured") else ""}
+        {"<div>Path: <code>" + s3_status.get("vault_path", "") + "</code></div>" if s3_status.get("configured") else ""}
+        {
+            "<p class='hint'>Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME, AWS_REGION, S3_VAULT_PATH env vars.</p>"
+            if not s3_status.get("configured") else ""
+        }
+      </div>
+      <div class="card">
+        <h3>S3 Status</h3>
+        {"<div>Vault in S3: " + ("✓" if s3_status.get("vault_exists") else "✗") + "</div>" if s3_status.get("configured") else "<div>N/A</div>"}
+        {"<div>Config in S3: " + ("✓" if s3_status.get("config_exists") else "✗") + "</div>" if s3_status.get("configured") else ""}
+        {"<div>Hint in S3: " + ("✓" if s3_status.get("hint_exists") else "✗") + "</div>" if s3_status.get("configured") else ""}
+        <div class="hint">Last check: {s3_status.get("last_check", "N/A")}</div>
+      </div>
+    </div>
+    """
+    
+    hint_card = f"""
+    <div class="card">
+      <h3>Master Password Hint</h3>
+      {"<div style='padding: 12px; background: #0a140f; border-radius: 8px; border: 1px solid var(--border);'>" + hint + "</div>" if hint else "<p class='hint'>No master password hint set.</p>"}
+    </div>
+    """
+    
+    sync_card = """
+    <div class="grid grid-2">
+      <div class="card">
+        <h3>Sync to S3</h3>
+        <p class="hint">Upload local vault and config to S3 bucket.</p>
+        <form method="post" action="/s3/sync-to">
+          <div class="actions">
+            <button type="submit" class="btn primary">Upload to S3</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Sync from S3</h3>
+        <p class="hint">Download vault and config from S3 bucket to local storage.</p>
+        <form method="post" action="/s3/sync-from">
+          <div class="actions">
+            <button type="submit" class="btn">Download from S3</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    """
+    
+    hint_form = """
+    <div class="card">
+      <h3>Set Master Password Hint</h3>
+      <form method="post" action="/s3/set-hint">
+        <div class="form-grid">
+          <div class="field">
+            <label>Master Password</label>
+            <div class="input-row">
+              <input type="password" name="master" required />
+              <button type="button" class="btn eye" onclick="const inp=this.previousElementSibling; const wasPwd=inp.type==='password'; inp.type=wasPwd?'text':'password'; this.textContent=inp.type==='password'?'👁️':'🙈';">👁️</button>
+            </div>
+          </div>
+          <div>
+            <label>New Hint</label>
+            <input type="text" name="hint" required placeholder="e.g., My favorite pet's name + birth year" />
+          </div>
+        </div>
+        <div class="actions">
+          <button type="submit" class="btn">Save Hint</button>
+        </div>
+      </form>
+      <p class="hint">Hint is encrypted before storing in S3.</p>
+    </div>
+    """
+    
+    content = status_cards + hint_card + sync_card + hint_form
+    return HTMLResponse(BASE_TEMPLATE.render(content=content))
+
+
+@app.post("/s3/sync-to", response_class=HTMLResponse)
+def s3_sync_to_post() -> HTMLResponse:
+    from .vault import sync_to_s3
+    
+    if not is_s3_configured():
+        content = "<div class='card'><p>S3 is not configured. Set AWS environment variables.</p></div>"
+        return HTMLResponse(BASE_TEMPLATE.render(content=content))
+    
+    success, message = sync_to_s3()
+    
+    # Update last sync timestamp
+    cfg = load_config()
+    cfg["last_s3_sync_at"] = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+    save_config(cfg)
+    
+    if success:
+        content = f"<div class='card'><p>✓ Vault synced to S3.</p><p class='hint'>{message}</p></div>"
+    else:
+        content = f"<div class='card'><p>✗ S3 sync failed.</p><p class='hint'>{message}</p></div>"
+    return HTMLResponse(BASE_TEMPLATE.render(content=content))
+
+
+@app.post("/s3/sync-from", response_class=HTMLResponse)
+def s3_sync_from_post() -> HTMLResponse:
+    from .vault import sync_from_s3
+    
+    if not is_s3_configured():
+        content = "<div class='card'><p>S3 is not configured. Set AWS environment variables.</p></div>"
+        return HTMLResponse(BASE_TEMPLATE.render(content=content))
+    
+    success, message = sync_from_s3()
+    
+    if success:
+        content = f"<div class='card'><p>✓ Vault synced from S3.</p><p class='hint'>{message}</p></div>"
+    else:
+        content = f"<div class='card'><p>⚠ S3 sync completed with issues.</p><p class='hint'>{message}</p></div>"
+    return HTMLResponse(BASE_TEMPLATE.render(content=content))
+
+
+@app.post("/s3/set-hint", response_class=HTMLResponse)
+def s3_set_hint_post(master: str = Form(...), hint: str = Form(...)) -> HTMLResponse:
+    # Verify master password
+    stored = get_master_password_hash()
+    if not stored:
+        content = "<div class='card'><p>Master password not configured.</p></div>"
+        return HTMLResponse(BASE_TEMPLATE.render(content=content))
+    
+    try:
+        ok = bcrypt.checkpw(master.encode("utf-8"), stored.encode("utf-8"))
+    except Exception:
+        ok = False
+    
+    if not ok:
+        content = "<div class='card'><p>Master password invalid.</p></div>"
+        return HTMLResponse(BASE_TEMPLATE.render(content=content))
+    
+    if not hint or not hint.strip():
+        content = "<div class='card'><p>Hint cannot be empty.</p></div>"
+        return HTMLResponse(BASE_TEMPLATE.render(content=content))
+    
+    success = set_master_password_hint(hint.strip())
+    
+    if success:
+        content = "<div class='card'><p>✓ Master password hint saved.</p></div>"
+    else:
+        content = "<div class='card'><p>✗ Failed to save hint.</p></div>"
     return HTMLResponse(BASE_TEMPLATE.render(content=content))

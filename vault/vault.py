@@ -39,15 +39,23 @@ from cryptography.fernet import Fernet, InvalidToken  # type: ignore
 from .config import (
     AuditLogger,
     DEFAULT_VAULT_PATH,
+    DEFAULT_CONFIG_PATH,
     SecurityPolicy,
     build_policy_from_config,
     load_config,
+    increment_stat,
 )
 from .utils.obfuscation import (
     obfuscate_service_name,
     deobfuscate_service_name,
 )
 from .utils.cloud_sync import sync_encrypted_vault
+from .utils.s3_storage import (
+    is_s3_configured,
+    upload_vault_to_s3,
+    download_vault_from_s3,
+    initialize_from_s3,
+)
 
 
 @dataclass
@@ -105,9 +113,16 @@ class VaultEngine:
 
         Notes:
             Returns an empty dict if the file does not exist.
+            If S3 is configured and local file doesn't exist, downloads from S3.
         """
         try:
+            # If local file doesn't exist, try to download from S3
             if not os.path.exists(self.vault_path):
+                if is_s3_configured():
+                    downloaded = download_vault_from_s3(self.vault_path)
+                    if downloaded and os.path.exists(self.vault_path):
+                        with open(self.vault_path, "r", encoding="utf-8") as f:
+                            return json.load(f)
                 return {}
             with open(self.vault_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -125,16 +140,32 @@ class VaultEngine:
 
         Returns:
             True on success, False otherwise.
+        
+        Notes:
+            If S3 auto-sync is enabled, uploads to S3 after local save.
         """
         try:
             directory = os.path.dirname(self.vault_path)
             os.makedirs(directory, exist_ok=True)
             tmp_path = f"{self.vault_path}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
+                try:
+                    os.chmod(tmp_path, 0o600)
+                except Exception:
+                    pass
                 json.dump(vault_data, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, self.vault_path)
+            
+            # Auto-sync to S3 if enabled
+            if self.policy.s3_sync_enabled and self.policy.s3_auto_sync:
+                if is_s3_configured():
+                    try:
+                        upload_vault_to_s3(self.vault_path)
+                    except Exception:
+                        pass  # Don't fail local save if S3 sync fails
+            
             return True
         except Exception:
             # Best-effort cleanup
@@ -199,6 +230,8 @@ class VaultEngine:
                 pass
         if ok and self.audit:
             self.audit.emit("add_entry", {"service_obf": obf_key})
+        if ok:
+            increment_stat("entries_created_count")
         return ok
 
     def get_entry(self, master_password: str, service_name: str) -> Optional[Dict[str, str]]:
@@ -363,6 +396,8 @@ class VaultEngine:
                             pass
                     if ok and self.audit:
                         self.audit.emit("delete_entry", {"service_obf": obf_key})
+                    if ok:
+                        increment_stat("entries_deleted_count")
                     return ok
             except Exception:
                 continue
@@ -441,6 +476,13 @@ class VaultEngine:
 
 
 # ---------------------------- Functional API ------------------------------
+# Initialize from S3 on module load if configured
+try:
+    if is_s3_configured():
+        initialize_from_s3(DEFAULT_VAULT_PATH, DEFAULT_CONFIG_PATH)
+except Exception:
+    pass  # Don't fail module load if S3 initialization fails
+
 _cfg = load_config()
 _policy = build_policy_from_config(_cfg)
 _audit = AuditLogger()
@@ -551,6 +593,10 @@ def export_vault(path: str) -> bool:
                 "source_info": cipher.decrypt(entry["source"].encode("ascii")).decode("utf-8"),
             })
         with open(path, "w", encoding="utf-8") as f:
+            try:
+                os.chmod(path, 0o600)
+            except Exception:
+                pass
             json.dump(out, f, indent=2)
         _audit.emit("export_vault", {"path": path, "count": len(out)})
         return True
@@ -607,3 +653,52 @@ def count_entries() -> int:
         return len(v)
     except Exception:
         return 0
+
+
+# ------------------------------ S3 Sync API --------------------------------
+
+
+def sync_to_s3() -> tuple:
+    """Sync vault to S3 bucket.
+    
+    Returns:
+        Tuple of (success, message).
+    """
+    from .utils.s3_storage import sync_to_s3 as _sync_to_s3
+    from .config import DEFAULT_CONFIG_PATH
+    
+    if not is_s3_configured():
+        return False, "S3 not configured"
+    
+    try:
+        return _sync_to_s3(_engine.vault_path, DEFAULT_CONFIG_PATH)
+    except Exception as e:
+        return False, str(e)
+
+
+def sync_from_s3() -> tuple:
+    """Sync vault from S3 bucket.
+    
+    Returns:
+        Tuple of (success, message).
+    """
+    from .utils.s3_storage import sync_from_s3 as _sync_from_s3
+    from .config import DEFAULT_CONFIG_PATH
+    
+    if not is_s3_configured():
+        return False, "S3 not configured"
+    
+    try:
+        return _sync_from_s3(_engine.vault_path, DEFAULT_CONFIG_PATH)
+    except Exception as e:
+        return False, str(e)
+
+
+def get_s3_status() -> dict:
+    """Get S3 configuration and sync status.
+    
+    Returns:
+        Dict with S3 status information.
+    """
+    from .utils.s3_storage import get_s3_status as _get_s3_status
+    return _get_s3_status()
